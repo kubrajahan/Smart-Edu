@@ -1,0 +1,6 @@
+{
+  "name": "SmartEdu AI",
+  "description": "Intelligent School Management System powered by Google AI Studio (Gemini)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
