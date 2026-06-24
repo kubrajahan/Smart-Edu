@@ -11,7 +11,7 @@ import StudentDashboard from "./components/StudentDashboard";
 import ParentDashboard from "./components/ParentDashboard";
 import AIChatBot from "./components/AIChatBot";
 import RoleLogin from "./components/RoleLogin";
-import { Student, Teacher, LibraryBook, TransportRoute, TimetableEntry, LessonPlan, GeneratedExam, LoginCredential } from "./types";
+import { Student, Teacher, LibraryBook, TransportRoute, TimetableEntry, LessonPlan, GeneratedExam, LoginCredential, Course, SchoolClass } from "./types";
 import { 
   Loader2, 
   School, 
@@ -40,6 +40,8 @@ export default function App() {
   const [lessonPlans, setLessonPlans] = useState<LessonPlan[]>([]);
   const [generatedExams, setGeneratedExams] = useState<GeneratedExam[]>([]);
   const [logins, setLogins] = useState<LoginCredential[]>([]);
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [classes, setClasses] = useState<SchoolClass[]>([]);
 
   // Password-protected session authentications
   const [teacherAuthId, setTeacherAuthId] = useState<string | null>(null);
@@ -60,6 +62,8 @@ export default function App() {
         setLessonPlans(data.lessonPlans);
         setGeneratedExams(data.generatedExams);
         setLogins(data.logins || []);
+        setCourses(data.courses || []);
+        setClasses(data.classes || []);
       }
     } catch (err) {
       console.error("Failed to sync client state from school database:", err);
@@ -252,6 +256,57 @@ export default function App() {
     }
   };
 
+  const handleAssignClassTeacher = async (teacherId: string, grade: string) => {
+    try {
+      const res = await fetch("/api/school/teacher/assign-class", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ teacherId, grade }),
+      });
+      if (res.ok) {
+        await syncDatabase();
+      } else {
+        throw new Error("Assigning class teacher failed");
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleAddCourse = async (courseData: any) => {
+    try {
+      const res = await fetch("/api/school/course/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(courseData),
+      });
+      if (res.ok) {
+        await syncDatabase();
+      } else {
+        throw new Error("Add course failed");
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleAddClass = async (classData: any) => {
+    try {
+      const res = await fetch("/api/school/class/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(classData),
+      });
+      if (res.ok) {
+        await syncDatabase();
+      } else {
+        throw new Error("Add class failed");
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   // Render Role Dashboard
   const renderDashboard = () => {
     switch (currentRole) {
@@ -273,6 +328,11 @@ export default function App() {
             onPayFees={handlePayFees}
             onUpdateFees={handleUpdateFees}
             onSyncDatabase={syncDatabase}
+            onAssignClassTeacher={handleAssignClassTeacher}
+            courses={courses}
+            classes={classes}
+            onAddCourse={handleAddCourse}
+            onAddClass={handleAddClass}
           />
         );
       case "principal":
@@ -308,6 +368,8 @@ export default function App() {
             onLogGrade={handleLogGrade}
             loggedInTeacherId={teacherAuthId}
             onLogout={() => setTeacherAuthId(null)}
+            courses={courses}
+            classes={classes}
           />
         );
       case "student":

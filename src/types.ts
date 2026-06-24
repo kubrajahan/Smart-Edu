@@ -77,6 +77,7 @@ export interface Teacher {
   email: string;
   subject: string;
   assignedGrades: string[];
+  classTeacherOf?: string;
 }
 
 export interface LessonPlan {
@@ -166,3 +167,19 @@ export interface ChatMessage {
   text: string;
   createdAt: string;
 }
+
+export interface Course {
+  id: string;
+  name: string;
+  code: string;
+  description?: string;
+}
+
+export interface SchoolClass {
+  id: string;
+  name: string; // e.g., "10-A", "9-B"
+  section: string; // e.g., "A", "B"
+  assignedSubjects: string[]; // Subject names or course names
+  classTeacherId?: string; // Teacher ID
+}
+

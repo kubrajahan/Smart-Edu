@@ -9,8 +9,16 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import { initializeApp as initFirebaseApp } from "firebase/app";
+import { getFirestore as initFirestore, doc, getDoc, setDoc } from "firebase/firestore";
 
 dotenv.config();
+
+// Load Firebase configuration safely using fs to prevent ESM JSON import syntax discrepancies
+const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+const firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+const firebaseApp = initFirebaseApp(firebaseConfig);
+const firestoreDb = initFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 
 // Initialize Gemini Client
 const apiKey = process.env.GEMINI_API_KEY;
@@ -152,9 +160,9 @@ async function start() {
   ];
 
   const defaultTeachers = [
-    { id: "tch-1", name: "Dr. Sarah Jenkins", email: "sarah.jenkins@smartedu.edu", subject: "Mathematics", assignedGrades: ["10-A", "9-B"] },
-    { id: "tch-2", name: "Prof. Kenneth Cole", email: "kenneth.cole@smartedu.edu", subject: "Science", assignedGrades: ["10-A", "9-B"] },
-    { id: "tch-3", name: "Ms. Elena Rostova", email: "elena.rostova@smartedu.edu", subject: "English", assignedGrades: ["10-A", "9-B"] },
+    { id: "tch-1", name: "Dr. Sarah Jenkins", email: "sarah.jenkins@smartedu.edu", subject: "Mathematics", assignedGrades: ["10-A", "9-B"], classTeacherOf: "10-A" },
+    { id: "tch-2", name: "Prof. Kenneth Cole", email: "kenneth.cole@smartedu.edu", subject: "Science", assignedGrades: ["10-A", "9-B"], classTeacherOf: "9-B" },
+    { id: "tch-3", name: "Ms. Elena Rostova", email: "elena.rostova@smartedu.edu", subject: "English", assignedGrades: ["10-A", "9-B"], classTeacherOf: "" },
   ];
 
   const defaultLibraryBooks = [
@@ -183,6 +191,19 @@ async function start() {
     { id: "log-3", userType: "parent", targetId: "std-1", targetName: "Fatima Rahman", username: "fatima.rahman", password: "Password123", status: "Active", assignedAt: "2026-06-22T10:02:00.000Z" }
   ];
 
+  const defaultCourses = [
+    { id: "crs-1", name: "Mathematics", code: "MATH101", description: "Core algebra, calculus and geometry" },
+    { id: "crs-2", name: "Science", code: "SCI101", description: "Physics, Chemistry and Biology basics" },
+    { id: "crs-3", name: "English", code: "ENG101", description: "Grammar, literature and composition" },
+    { id: "crs-4", name: "Social Studies", code: "SOC101", description: "History, geography and civics" },
+    { id: "crs-5", name: "Computer Science", code: "CS101", description: "Introduction to coding and IT" }
+  ];
+
+  const defaultClasses = [
+    { id: "cls-1", name: "10-A", section: "A", assignedSubjects: ["Mathematics", "Science", "English", "Social Studies", "Computer Science"], classTeacherId: "tch-1" },
+    { id: "cls-2", name: "9-B", section: "B", assignedSubjects: ["Mathematics", "Science", "English", "Social Studies", "Computer Science"], classTeacherId: "tch-2" }
+  ];
+
   let students: any[] = [];
   let teachers: any[] = [];
   let libraryBooks: any[] = [];
@@ -191,9 +212,12 @@ async function start() {
   let lessonPlans: any[] = [];
   let generatedExams: any[] = [];
   let logins: any[] = [];
+  let courses: any[] = [];
+  let classes: any[] = [];
 
-  function saveDb() {
+  async function saveDb() {
     try {
+      // 1. Write synchronously to local disk as a local backup/cache
       fs.writeFileSync(
         DB_PATH,
         JSON.stringify({
@@ -204,33 +228,106 @@ async function start() {
           timetable,
           lessonPlans,
           generatedExams,
-          logins
+          logins,
+          courses,
+          classes
         }, null, 2),
         "utf-8"
       );
     } catch (err) {
-      console.error("Failed to persist database state to storage disk:", err);
+      console.error("Failed to persist database state to local storage disk:", err);
+    }
+
+    // 2. Write asynchronously to Firestore cloud for durable cloud persistence
+    try {
+      const collectionsToSave = {
+        students,
+        teachers,
+        libraryBooks,
+        transportRoutes,
+        timetable,
+        lessonPlans,
+        generatedExams,
+        logins,
+        courses,
+        classes
+      };
+
+      for (const [key, val] of Object.entries(collectionsToSave)) {
+        await setDoc(doc(firestoreDb, "school_state", key), { data: val });
+      }
+      console.log("School database successfully persisted to durable Firestore cloud.");
+    } catch (err) {
+      console.error("Failed to persist database state to Firestore cloud:", err);
     }
   }
 
-  function loadDb() {
+  async function loadDb() {
     try {
-      if (fs.existsSync(DB_PATH)) {
-        const fileContent = fs.readFileSync(DB_PATH, "utf-8");
-        const parsed = JSON.parse(fileContent);
-        students = parsed.students || [];
-        teachers = parsed.teachers || [];
-        libraryBooks = parsed.libraryBooks || [];
-        transportRoutes = parsed.transportRoutes || [];
-        timetable = parsed.timetable || [];
-        lessonPlans = parsed.lessonPlans || [];
-        generatedExams = parsed.generatedExams || [];
-        logins = parsed.logins || [];
-        console.log("School database successfully restored from disk storage.");
-      } else {
-        console.log("No persistent database detected. Creating initial school database records...");
-        // Clone initial structures
-        students = JSON.parse(JSON.stringify(defaultStudents));
+      let loadedFromCloud = false;
+
+      // Try loading from Cloud Firestore first
+      try {
+        console.log("Attempting to restore school database from Firestore cloud...");
+        const keys = [
+          "students",
+          "teachers",
+          "libraryBooks",
+          "transportRoutes",
+          "timetable",
+          "lessonPlans",
+          "generatedExams",
+          "logins",
+          "courses",
+          "classes"
+        ];
+
+        const loadedData: any = {};
+        for (const key of keys) {
+          const snap = await getDoc(doc(firestoreDb, "school_state", key));
+          if (snap.exists()) {
+            loadedData[key] = snap.data().data;
+          }
+        }
+
+        // Check if we successfully loaded any data from cloud
+        if (Object.keys(loadedData).length > 0) {
+          students = loadedData.students || [];
+          teachers = loadedData.teachers || [];
+          libraryBooks = loadedData.libraryBooks || [];
+          transportRoutes = loadedData.transportRoutes || [];
+          timetable = loadedData.timetable || [];
+          lessonPlans = loadedData.lessonPlans || [];
+          generatedExams = loadedData.generatedExams || [];
+          logins = loadedData.logins || [];
+          courses = loadedData.courses && loadedData.courses.length > 0 ? loadedData.courses : JSON.parse(JSON.stringify(defaultCourses));
+          classes = loadedData.classes && loadedData.classes.length > 0 ? loadedData.classes : JSON.parse(JSON.stringify(defaultClasses));
+          loadedFromCloud = true;
+          console.log("School database successfully restored from Firestore cloud!");
+        }
+      } catch (cloudErr) {
+        console.warn("Could not load from Firestore cloud (falling back to disk):", cloudErr);
+      }
+
+      if (!loadedFromCloud) {
+        if (fs.existsSync(DB_PATH)) {
+          const fileContent = fs.readFileSync(DB_PATH, "utf-8");
+          const parsed = JSON.parse(fileContent);
+          students = parsed.students || [];
+          teachers = parsed.teachers || [];
+          libraryBooks = parsed.libraryBooks || [];
+          transportRoutes = parsed.transportRoutes || [];
+          timetable = parsed.timetable || [];
+          lessonPlans = parsed.lessonPlans || [];
+          generatedExams = parsed.generatedExams || [];
+          logins = parsed.logins || [];
+          courses = parsed.courses && parsed.courses.length > 0 ? parsed.courses : JSON.parse(JSON.stringify(defaultCourses));
+          classes = parsed.classes && parsed.classes.length > 0 ? parsed.classes : JSON.parse(JSON.stringify(defaultClasses));
+          console.log("School database successfully restored from disk storage.");
+        } else {
+          console.log("No persistent database detected. Creating initial school database records...");
+          // Clone initial structures
+          students = JSON.parse(JSON.stringify(defaultStudents));
         
         // Dynamic academic record / payment logging enrichment logic on initial seed
         students.forEach((student) => {
@@ -325,15 +422,18 @@ async function start() {
         transportRoutes = JSON.parse(JSON.stringify(defaultTransportRoutes));
         timetable = JSON.parse(JSON.stringify(defaultTimetable));
         logins = JSON.parse(JSON.stringify(defaultLogins));
+        courses = JSON.parse(JSON.stringify(defaultCourses));
+        classes = JSON.parse(JSON.stringify(defaultClasses));
 
-        saveDb();
+        await saveDb();
       }
+    }
     } catch (error) {
       console.error("Failed to restore or seed databases from storage:", error);
     }
   }
 
-  loadDb();
+  await loadDb();
 
   // API 1: Fetch state representation
   app.get("/api/school/db", (req, res) => {
@@ -345,7 +445,9 @@ async function start() {
       timetable,
       lessonPlans,
       generatedExams,
-      logins
+      logins,
+      courses,
+      classes
     });
   });
 
@@ -355,9 +457,80 @@ async function start() {
     newStudent.id = `std-${Date.now()}`;
     newStudent.attendanceRate = 100;
     newStudent.attendanceHistory = [{ date: new Date().toISOString().split("T")[0], status: "Present" }];
+    
+    // Automatically assign subjects and class teacher based on target class (grade)
+    const targetClass = classes.find((c: any) => c.name === newStudent.grade);
+    if (targetClass) {
+      newStudent.grades = {};
+      if (Array.isArray(targetClass.assignedSubjects)) {
+        targetClass.assignedSubjects.forEach((sub: string) => {
+          newStudent.grades[sub] = 0; // Initialize grades for all subjects of this class to 0
+        });
+      }
+      
+      if (targetClass.classTeacherId) {
+        newStudent.classTeacherId = targetClass.classTeacherId;
+        const teacher = teachers.find((t: any) => t.id === targetClass.classTeacherId);
+        if (teacher) {
+          newStudent.classTeacherName = teacher.name;
+        }
+      }
+    } else {
+      // Fallback if class configuration is missing
+      newStudent.grades = { Mathematics: 0, Science: 0, English: 0, "Social Studies": 0, "Computer Science": 0 };
+    }
+
     students.push(newStudent);
     saveDb();
     res.json({ success: true, student: newStudent });
+  });
+
+  // API 2a-1: Add Course
+  app.post("/api/school/course/add", (req, res) => {
+    const { name, code, description } = req.body;
+    const newCourse = {
+      id: `crs-${Date.now()}`,
+      name,
+      code,
+      description: description || ""
+    };
+    courses.push(newCourse);
+    saveDb();
+    res.json({ success: true, course: newCourse });
+  });
+
+  // API 2a-2: Add Class
+  app.post("/api/school/class/add", (req, res) => {
+    const { name, section, assignedSubjects, classTeacherId } = req.body;
+    const newClass = {
+      id: `cls-${Date.now()}`,
+      name,
+      section,
+      assignedSubjects: assignedSubjects || [],
+      classTeacherId: classTeacherId || ""
+    };
+    classes.push(newClass);
+
+    // If teacher is assigned, update teacher's classTeacherOf field
+    if (classTeacherId) {
+      // Clear anyone else assigned as class teacher for this class name
+      teachers.forEach((t) => {
+        if (t.classTeacherOf === name) {
+          t.classTeacherOf = "";
+        }
+      });
+      // Assign teacher
+      const teacher = teachers.find((t) => t.id === classTeacherId);
+      if (teacher) {
+        teacher.classTeacherOf = name;
+        if (!teacher.assignedGrades.includes(name)) {
+          teacher.assignedGrades.push(name);
+        }
+      }
+    }
+
+    saveDb();
+    res.json({ success: true, class: newClass });
   });
 
   // API 2b: Assign a school login
@@ -449,6 +622,38 @@ async function start() {
     } else {
       res.status(404).json({ error: "Student not found" });
     }
+  });
+
+  // API 3b: Assign class teacher of a grade
+  app.post("/api/school/teacher/assign-class", (req, res) => {
+    const { teacherId, grade } = req.body;
+    
+    // Ensure all teachers have classTeacherOf field
+    teachers.forEach((t) => {
+      if (!t.hasOwnProperty("classTeacherOf")) {
+        t.classTeacherOf = "";
+      }
+    });
+
+    // Unassign other teachers from this grade as class teacher
+    if (grade) {
+      teachers.forEach((t) => {
+        if (t.classTeacherOf === grade) {
+          t.classTeacherOf = "";
+        }
+      });
+    }
+
+    // Assign to chosen teacher if teacherId is provided
+    if (teacherId && grade) {
+      const teacher = teachers.find((t) => t.id === teacherId);
+      if (teacher) {
+        teacher.classTeacherOf = grade;
+      }
+    }
+
+    saveDb();
+    res.json({ success: true, teachers });
   });
 
   // API 4: Log Grade

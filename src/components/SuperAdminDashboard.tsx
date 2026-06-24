@@ -4,12 +4,14 @@
  */
 
 import React, { useState, useMemo, useEffect } from "react";
-import { Users, GraduationCap, DollarSign, BookOpen, Truck, ListCollapse, Plus, Sparkles, Database, FileText, CheckCircle2, Shield, UserCheck, ShieldAlert, Key, Unlock, Trash2, Edit2, Check, RefreshCw, AlertCircle, Award, Coins } from "lucide-react";
-import { Student, Teacher, LibraryBook, TransportRoute, LoginCredential, TimetableEntry } from "../types";
+import { Users, GraduationCap, DollarSign, BookOpen, School, Truck, ListCollapse, Plus, Sparkles, Database, FileText, CheckCircle2, Shield, UserCheck, ShieldAlert, Key, Unlock, Trash2, Edit2, Check, RefreshCw, AlertCircle, Award, Coins } from "lucide-react";
+import { Student, Teacher, LibraryBook, TransportRoute, LoginCredential, TimetableEntry, Course, SchoolClass } from "../types";
 import ScholasticResultsLedger from "./ScholasticResultsLedger";
 import SchoolFeesRegistry from "./SchoolFeesRegistry";
 import { db, handleFirestoreError, OperationType } from "../firebase";
 import { doc, setDoc } from "firebase/firestore";
+import { supabase, SUPABASE_SQL_SCHEMA, testSupabaseConnection } from "../supabase";
+
 
 interface SuperAdminDashboardProps {
   students: Student[];
@@ -27,6 +29,11 @@ interface SuperAdminDashboardProps {
   onPayFees: (studentId: string, amount: number, method: string, remarks?: string) => Promise<boolean>;
   onUpdateFees: (studentId: string, total: number, status?: string) => Promise<boolean>;
   onSyncDatabase?: () => Promise<void>;
+  onAssignClassTeacher?: (teacherId: string, grade: string) => Promise<void>;
+  courses: Course[];
+  classes: SchoolClass[];
+  onAddCourse: (course: any) => Promise<void>;
+  onAddClass: (schoolClass: any) => Promise<void>;
 }
 
 export default function SuperAdminDashboard({
@@ -44,9 +51,14 @@ export default function SuperAdminDashboard({
   onDeleteLogin,
   onPayFees,
   onUpdateFees,
-  onSyncDatabase
+  onSyncDatabase,
+  onAssignClassTeacher,
+  courses = [],
+  classes = [],
+  onAddCourse,
+  onAddClass
 }: SuperAdminDashboardProps) {
-  const [activeSection, setActiveSection] = useState<string>("exams");
+  const [activeSection, setActiveSection] = useState<string>("school_setup");
   const [showAddForm, setShowAddForm] = useState(false);
   const [newStudent, setNewStudent] = useState({
     name: "",
@@ -67,6 +79,18 @@ export default function SuperAdminDashboard({
     timeSlot: "08:30 AM - 09:30 AM",
     room: "Room 101"
   });
+
+  // Course registry and class setup form states
+  const [courseForm, setCourseForm] = useState({ name: "", code: "", description: "" });
+  const [classForm, setClassForm] = useState({ name: "", section: "", assignedSubjects: [] as string[], classTeacherId: "" });
+  const [courseSuccess, setCourseSuccess] = useState(false);
+  const [classSuccess, setClassSuccess] = useState(false);
+
+  useEffect(() => {
+    if (classes.length > 0 && !classes.some(cls => cls.name === newStudent.grade)) {
+      setNewStudent(prev => ({ ...prev, grade: classes[0].name }));
+    }
+  }, [classes]);
 
   const [studentSearchQuery, setStudentSearchQuery] = useState("");
   const [studentGradeFilter, setStudentGradeFilter] = useState("All");
@@ -135,6 +159,181 @@ export default function SuperAdminDashboard({
       setFirestoreSyncing(false);
     }
   };
+
+  // Supabase Custom Sync & Migration Hub Integration
+  const [supabaseSyncing, setSupabaseSyncing] = useState(false);
+  const [supabaseSyncStatus, setSupabaseSyncStatus] = useState<string | null>(null);
+  const [supabaseConnected, setSupabaseConnected] = useState<boolean | null>(null);
+  const [copiedSql, setCopiedSql] = useState(false);
+  const [showSqlEditor, setShowSqlEditor] = useState(false);
+
+  const checkSupabaseConn = async () => {
+    const check = await testSupabaseConnection();
+    setSupabaseConnected(check.success);
+    return check.success;
+  };
+
+  useEffect(() => {
+    checkSupabaseConn();
+  }, []);
+
+  const handleSyncSupabase = async (mode: "all" | "structured" | "backup" = "all") => {
+    setSupabaseSyncing(true);
+    setSupabaseSyncStatus("Contacting Supabase API...");
+    try {
+      const isOk = await checkSupabaseConn();
+      if (!isOk) {
+        alert("Unable to establish handshake with Supabase server. Please verify connections or keys.");
+        setSupabaseSyncStatus("Handshake failed");
+        setTimeout(() => setSupabaseSyncStatus(null), 4000);
+        setSupabaseSyncing(false);
+        return;
+      }
+
+      let syncLogDetails = "";
+      let hasError = false;
+
+      // Type 1: Structured database table inserts (Requires running the SQL schema in their editor)
+      if (mode === "all" || mode === "structured") {
+        setSupabaseSyncStatus("Migrating tables (students, teachers, ...) to Postgres PostgresQL...");
+        
+        // Formulate student mapping payloads matching SQL expectations
+        const studentPayloads = students.map(s => ({
+          id: s.id,
+          name: s.name,
+          roll_number: s.rollNumber,
+          grade: s.grade,
+          gender: s.gender || null,
+          parent_name: s.parentName,
+          parent_email: s.parentEmail,
+          parent_phone: s.parentPhone,
+          attendance_rate: s.attendanceRate,
+          risk_level: s.riskLevel || "Low",
+          grades: s.grades || {},
+          attendance_history: s.attendanceHistory || [],
+          school_fees_status: s.schoolFeesStatus || {},
+          academic_results: s.academicResults || []
+        }));
+
+        const teacherPayloads = teachers.map(t => ({
+          id: t.id,
+          name: t.name,
+          email: t.email,
+          subject: t.subject,
+          assigned_grades: t.assignedGrades || []
+        }));
+
+        const bookPayloads = libraryBooks.map(b => ({
+          id: b.id,
+          title: b.title,
+          author: b.author,
+          isbn: b.isbn,
+          category: b.category,
+          total_copies: b.totalCopies,
+          issued_copies: b.issuedCopies
+        }));
+
+        const timetablePayloads = timetable.map(tt => ({
+          id: tt.id,
+          grade: tt.grade,
+          day: tt.day,
+          subject: tt.subject,
+          teacher: tt.teacher,
+          time_slot: tt.timeSlot,
+          room: tt.room
+        }));
+
+        const routePayloads = transportRoutes.map(r => ({
+          id: r.id,
+          route_name: r.routeName,
+          bus_number: r.busNumber,
+          driver_name: r.driverName,
+          driver_phone: r.driverPhone,
+          stops: r.stops || [],
+          student_count: r.studentCount
+        }));
+
+        const loginPayloads = logins.map(l => ({
+          id: l.id,
+          user_type: l.userType,
+          target_id: l.targetId,
+          target_name: l.targetName,
+          username: l.username,
+          password: l.password || "",
+          status: l.status,
+          assigned_at: l.assignedAt
+        }));
+
+        // Upsert into Supabase tables using the anonymous client
+        const studentsResp = await supabase.from("students").upsert(studentPayloads);
+        const teachersResp = await supabase.from("teachers").upsert(teacherPayloads);
+        const booksResp = await supabase.from("library_books").upsert(bookPayloads);
+        const timetableResp = await supabase.from("timetable").upsert(timetablePayloads);
+        const routesResp = await supabase.from("transport_routes").upsert(routePayloads);
+        const loginsResp = await supabase.from("login_credentials").upsert(loginPayloads);
+
+        if (studentsResp.error || teachersResp.error || booksResp.error || timetableResp.error || routesResp.error || loginsResp.error) {
+          console.warn("Structured table synchronization was ignored or failed. This is expected if target tables are not created on Supabase yet.", {
+            s: studentsResp.error, t: teachersResp.error, b: booksResp.error, tt: timetableResp.error, r: routesResp.error, l: loginsResp.error
+          });
+          hasError = true;
+        } else {
+          syncLogDetails += `Pushed structured registers (${studentPayloads.length} students, ${teacherPayloads.length} teachers, ${bookPayloads.length} books, ${timetablePayloads.length} classes, ${routePayloads.length} bus routes, and ${loginPayloads.length} logins). `;
+        }
+      }
+
+      // Type 2: Fallback single flat payload master snapshot backup
+      if (mode === "all" || mode === "backup" || hasError) {
+        setSupabaseSyncStatus("Creating master backup snapshot store...");
+        const backupPayload = {
+          id: Date.now(),
+          synced_by: "SuperAdmin Dashboard",
+          students_count: students.length,
+          teachers_count: teachers.length,
+          library_books_count: libraryBooks.length,
+          payload: {
+            students,
+            teachers,
+            libraryBooks,
+            timetable,
+            logs
+          },
+          created_at: new Date().toISOString()
+        };
+
+        const backupResp = await supabase.from("school_system_backups").insert([backupPayload]);
+        
+        if (backupResp.error) {
+          console.error("Master backup snapshot write failed:", backupResp.error);
+          throw new Error(`Supabase synchronization failed: ${backupResp.error.message || "Ensure Table or Schema exists."}`);
+        } else {
+          syncLogDetails += "Created unified school system snapshot backup.";
+        }
+      }
+
+      setSupabaseSyncStatus("Supabase DB Successfully Synced!");
+      const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      setLogs(prev => [
+        {
+          id: Date.now(),
+          action: "Supabase DB Live Synced",
+          details: syncLogDetails || "Synchronized current school states with the hosted Supabase PostgreSQL server.",
+          model: "Supabase Postgres",
+          time: timeStr
+        },
+        ...prev
+      ]);
+      
+      setTimeout(() => setSupabaseSyncStatus(null), 5500);
+    } catch (err) {
+      console.error(err);
+      alert(`Supabase Cloud Database Synchronization Error!\n\nDetails: ${err instanceof Error ? err.message : String(err)}\n\nRecommendation: Please expand the 'Setup Postgres SQL Schema' helper tab inside this dashboard to automatically create your database structures with a single click inside Supabase.`);
+      setSupabaseSyncStatus("Sync failed - Needs SQL Schema Setup!");
+    } finally {
+      setSupabaseSyncing(false);
+    }
+  };
+
 
   // AI Timetable states
   const [aiGenGrade, setAiGenGrade] = useState("All");
@@ -345,6 +544,72 @@ export default function SuperAdminDashboard({
     }
   };
 
+  const handleCreateCourseSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!courseForm.name || !courseForm.code) return;
+    try {
+      await onAddCourse(courseForm);
+      setCourseSuccess(true);
+      // Add a nice log
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      setLogs(prev => [
+        {
+          id: Date.now(),
+          action: "Course Registry",
+          details: `Registered new course: ${courseForm.name} (${courseForm.code})`,
+          model: "System",
+          time: timeStr
+        },
+        ...prev
+      ]);
+      setCourseForm({ name: "", code: "", description: "" });
+      setTimeout(() => setCourseSuccess(false), 3000);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleCreateClassSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!classForm.name || !classForm.section) return;
+    try {
+      const classNameStr = `${classForm.name}-${classForm.section}`;
+      await onAddClass({
+        name: classNameStr,
+        section: classForm.section,
+        assignedSubjects: classForm.assignedSubjects,
+        classTeacherId: classForm.classTeacherId
+      });
+      setClassSuccess(true);
+      // Add a nice log
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      setLogs(prev => [
+        {
+          id: Date.now(),
+          action: "Class Setup",
+          details: `Created class & section: ${classNameStr}`,
+          model: "System",
+          time: timeStr
+        },
+        ...prev
+      ]);
+      setClassForm({ name: "", section: "", assignedSubjects: [], classTeacherId: "" });
+      setTimeout(() => setClassSuccess(false), 3000);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSubjectCheckboxChange = (subjectName: string) => {
+    setClassForm((prev) => {
+      const alreadyAssigned = prev.assignedSubjects.includes(subjectName);
+      const updated = alreadyAssigned
+        ? prev.assignedSubjects.filter((s) => s !== subjectName)
+        : [...prev.assignedSubjects, subjectName];
+      return { ...prev, assignedSubjects: updated };
+    });
+  };
+
   return (
     <div className="space-y-6">
       {/* Title Header */}
@@ -354,11 +619,36 @@ export default function SuperAdminDashboard({
           <p className="text-sm text-slate-500">Super Administrator Dashboard & System Security</p>
         </div>
         <div className="flex flex-wrap items-center gap-3 shrink-0">
+          {/* Diagnostic status badges */}
+          <div className="flex items-center gap-2 bg-slate-100 rounded-xl px-3 py-1.5 border border-slate-200">
+            <span className="text-[10px] uppercase font-bold text-slate-400 font-mono">Supabase:</span>
+            {supabaseConnected === null ? (
+              <span className="flex items-center gap-1 text-[11px] font-mono text-amber-600 font-bold">
+                <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Checking
+              </span>
+            ) : supabaseConnected ? (
+              <span className="flex items-center gap-1 text-[11px] font-mono text-emerald-600 font-bold">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> Synchronized
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-[11px] font-mono text-rose-600 font-bold">
+                <span className="w-2 h-2 rounded-full bg-rose-500"></span> Setup Needed
+              </span>
+            )}
+          </div>
+
           {firestoreSyncStatus && (
             <span className="text-xs text-indigo-600 font-mono font-bold animate-pulse">
               ● {firestoreSyncStatus}
             </span>
           )}
+
+          {supabaseSyncStatus && (
+            <span className="text-xs text-emerald-600 font-mono font-bold animate-pulse">
+              ● {supabaseSyncStatus}
+            </span>
+          )}
+
           <button
             onClick={handleSyncFirestore}
             disabled={firestoreSyncing}
@@ -367,8 +657,94 @@ export default function SuperAdminDashboard({
             <Database className="w-3.5 h-3.5" />
             {firestoreSyncing ? "Syncing..." : "Backup to Firebase"}
           </button>
+
+          <button
+            onClick={() => handleSyncSupabase("all")}
+            disabled={supabaseSyncing}
+            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl flex items-center gap-2 cursor-pointer transition select-none shadow-xs border border-emerald-650"
+          >
+            <Coins className="w-3.5 h-3.5" />
+            {supabaseSyncing ? "Syncing..." : "Connect & Push Supabase"}
+          </button>
+
+          <button
+            onClick={() => setShowSqlEditor(!showSqlEditor)}
+            className={`px-4 py-2 text-xs font-bold rounded-xl flex items-center gap-2 cursor-pointer transition select-none shadow-xs border ${
+              showSqlEditor 
+                ? "bg-slate-800 text-white border-slate-700" 
+                : "bg-white text-slate-700 hover:bg-slate-50 border-slate-200"
+            }`}
+          >
+            <FileText className="w-3.5 h-3.5" />
+            SQL Schema Setup
+          </button>
         </div>
       </div>
+
+      {/* SUPABASE DEPLOYMENT GUIDE & COPIER */}
+      {showSqlEditor && (
+        <div className="bg-slate-900 border border-slate-800 text-slate-100 rounded-2xl p-6 shadow-md space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="space-y-1">
+              <span className="text-[10px] bg-emerald-500/20 text-emerald-400 font-extrabold px-2.5 py-0.5 rounded-full uppercase tracking-wider font-mono">
+                1-Step Postgres Integration
+              </span>
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                PostgreSql DB Table Initialization Script
+              </h3>
+              <p className="text-xs text-slate-400">
+                Run this SQL query inside the Supabase SQL Editor to map complete schema structures for pupils, instructors, timetables, and system snapshots.
+              </p>
+            </div>
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(SUPABASE_SQL_SCHEMA);
+                setCopiedSql(true);
+                setTimeout(() => setCopiedSql(false), 2000);
+              }}
+              className="px-4 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs rounded-xl flex items-center gap-2 shadow-sm transition active:scale-98 shrink-0 cursor-pointer select-none"
+            >
+              {copiedSql ? (
+                <>
+                  <Check className="w-4 h-4" />
+                  Copied Script!
+                </>
+              ) : (
+                <>
+                  <Key className="w-4 h-4" />
+                  Copy SQL Script
+                </>
+              )}
+            </button>
+          </div>
+
+          <div className="relative">
+            <pre className="text-[11px] font-mono bg-slate-950 p-4 rounded-xl border border-slate-800 max-h-64 overflow-y-auto scoller-thin text-emerald-400 select-all leading-normal whitespace-pre-wrap">
+              {SUPABASE_SQL_SCHEMA}
+            </pre>
+            <div className="absolute bottom-3 right-3 text-[10px] text-slate-500 font-mono bg-slate-950 px-2 py-1 rounded border border-slate-800 pointer-events-none select-none">
+              PostgreSQL v16 compliant
+            </div>
+          </div>
+          
+          <div className="flex flex-col sm:flex-row items-center justify-between p-3.5 bg-white/5 rounded-xl border border-slate-800 text-xs text-slate-400 gap-3">
+            <span className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>
+                <strong>Quick Sync Mode:</strong> If you do not have tables defined, clicking <strong>Connect & Push Supabase</strong> will write backup state directly inside a fallback snapshot collector instantly!
+              </span>
+            </span>
+            <div className="flex gap-2 w-full sm:w-auto">
+              <button 
+                onClick={() => handleSyncSupabase("backup")}
+                className="w-full sm:w-auto px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white font-bold text-[11px] rounded-lg border border-slate-700 transition cursor-pointer select-none"
+              >
+                Sync Snapshot Fallback Only
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Stats Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -405,6 +781,7 @@ export default function SuperAdminDashboard({
               }}
               className="w-full bg-slate-800 text-white text-xs font-semibold px-4 py-3 pr-10 border border-slate-700 rounded-xl outline-indigo-500 cursor-pointer shadow-sm appearance-none transition-all"
             >
+              <option value="school_setup">🏫 Academic Structure Setup (Courses & Classes)</option>
               <option value="exams">🏆 Exams & Scholastic Ledger</option>
               <option value="fees">💳 Tuition & Fees Receivable Hub</option>
               <option value="students_registration">👥 Students Registration & Directory</option>
@@ -421,6 +798,279 @@ export default function SuperAdminDashboard({
 
       {/* DYNAMIC VIEW WORKSPACE */}
       
+      {/* 0. ACADEMIC STRUCTURE SETUP */}
+      {activeSection === "school_setup" && (
+        <div className="space-y-6 animate-in fade-in slide-in-from-bottom-3 duration-200">
+          
+          {/* Welcome Alert */}
+          <div className="bg-gradient-to-r from-indigo-50 to-teal-50 border border-indigo-100 rounded-2xl p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <h3 className="font-display font-bold text-slate-900 text-lg flex items-center gap-2">
+                <School className="w-5 h-5 text-indigo-600" />
+                Academic Structure Setup Module
+              </h3>
+              <p className="text-sm text-slate-650 leading-relaxed">
+                Register core school subjects (courses) and establish classes & sections. Assign subjects and designate Class Teachers to classes. Student admissions automatically enroll into these settings.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 text-indigo-600 font-semibold text-xs bg-white px-3 py-2 rounded-xl border border-indigo-100 shadow-xs">
+              <Sparkles className="w-4 h-4 animate-spin-slow" />
+              Active Integration Node
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            
+            {/* 1. COURSE REGISTRATION PORTLET */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs flex flex-col space-y-6">
+              <div className="border-b border-slate-100 pb-3">
+                <h4 className="font-display font-bold text-slate-900 text-base flex items-center gap-2">
+                  <BookOpen className="w-5 h-5 text-indigo-600" />
+                  1. Course & Subject Registration
+                </h4>
+                <p className="text-xs text-slate-500 mt-0.5">Define core courses and subjects in the school academic catalog.</p>
+              </div>
+
+              {/* Add Course Form */}
+              <form onSubmit={handleCreateCourseSubmit} className="bg-slate-50 rounded-xl p-4 border border-slate-200/60 space-y-3.5">
+                <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Add New Subject / Course</h5>
+                
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Course Name</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. Chemistry"
+                      value={courseForm.name}
+                      onChange={(e) => setCourseForm({ ...courseForm, name: e.target.value })}
+                      className="w-full text-xs px-3 py-2 bg-white border border-slate-200 rounded-lg outline-indigo-500 shadow-3xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Course Code</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. CHEM101"
+                      value={courseForm.code}
+                      onChange={(e) => setCourseForm({ ...courseForm, code: e.target.value })}
+                      className="w-full text-xs px-3 py-2 bg-white border border-slate-200 rounded-lg outline-indigo-500 shadow-3xs"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Course Description (Optional)</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Foundations of organic and physical sciences"
+                    value={courseForm.description}
+                    onChange={(e) => setCourseForm({ ...courseForm, description: e.target.value })}
+                    className="w-full text-xs px-3 py-2 bg-white border border-slate-200 rounded-lg outline-indigo-500 shadow-3xs"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between pt-1">
+                  {courseSuccess && (
+                    <span className="text-[11px] font-bold text-emerald-600 flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5" /> Registered successfully!
+                    </span>
+                  )}
+                  {!courseSuccess && <span />}
+                  <button
+                    type="submit"
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-750 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Register Subject
+                  </button>
+                </div>
+              </form>
+
+              {/* Course Catalog Table */}
+              <div className="space-y-2">
+                <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Academic Subject Catalog ({courses.length})</h5>
+                <div className="border border-slate-200 rounded-xl overflow-hidden">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-200 text-[10px] uppercase font-bold text-slate-400 font-mono">
+                        <th className="px-4 py-2.5">Subject</th>
+                        <th className="px-4 py-2.5">Code</th>
+                        <th className="px-4 py-2.5">Description</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
+                      {courses.length === 0 ? (
+                        <tr>
+                          <td colSpan={3} className="px-4 py-6 text-center text-slate-400 font-mono">No courses registered yet.</td>
+                        </tr>
+                      ) : (
+                        courses.map((crs) => (
+                          <tr key={crs.id} className="hover:bg-slate-50/50 transition-colors">
+                            <td className="px-4 py-2.5 font-bold text-slate-900">{crs.name}</td>
+                            <td className="px-4 py-2.5 font-mono text-indigo-600 font-semibold">{crs.code}</td>
+                            <td className="px-4 py-2.5 text-slate-500 truncate max-w-[200px]">{crs.description || "-"}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            </div>
+
+            {/* 2. CLASS & SECTION REGISTRATION PORTLET */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs flex flex-col space-y-6">
+              <div className="border-b border-slate-100 pb-3">
+                <h4 className="font-display font-bold text-slate-900 text-base flex items-center gap-2">
+                  <GraduationCap className="w-5 h-5 text-teal-600" />
+                  2. Class & Section Registry
+                </h4>
+                <p className="text-xs text-slate-500 mt-0.5">Establish physical classrooms, select stream courses, and designate class teachers.</p>
+              </div>
+
+              {/* Add Class Form */}
+              <form onSubmit={handleCreateClassSubmit} className="bg-slate-50 rounded-xl p-4 border border-slate-200/60 space-y-3.5">
+                <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Create Class & Section</h5>
+                
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Grade Level</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. 10 or 11"
+                      value={classForm.name}
+                      onChange={(e) => setClassForm({ ...classForm, name: e.target.value })}
+                      className="w-full text-xs px-3 py-2 bg-white border border-slate-200 rounded-lg outline-teal-500 shadow-3xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Section</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. A or B"
+                      value={classForm.section}
+                      onChange={(e) => setClassForm({ ...classForm, section: e.target.value })}
+                      className="w-full text-xs px-3 py-2 bg-white border border-slate-200 rounded-lg outline-teal-500 shadow-3xs"
+                    />
+                  </div>
+                </div>
+
+                {/* Assigned Subjects checkbox list */}
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1.5">Assign Core Subjects (Courses)</label>
+                  <div className="grid grid-cols-2 gap-2 bg-white p-3 rounded-lg border border-slate-200 max-h-36 overflow-y-auto">
+                    {courses.length === 0 ? (
+                      <p className="text-[11px] text-slate-400 font-mono col-span-2">Register subjects on the left first.</p>
+                    ) : (
+                      courses.map((crs) => (
+                        <label key={crs.id} className="flex items-center gap-2 text-xs font-medium text-slate-700 cursor-pointer hover:text-slate-900">
+                          <input
+                            type="checkbox"
+                            checked={classForm.assignedSubjects.includes(crs.name)}
+                            onChange={() => handleSubjectCheckboxChange(crs.name)}
+                            className="rounded text-teal-600 focus:ring-teal-500 border-slate-300 w-3.5 h-3.5"
+                          />
+                          <span>{crs.name}</span>
+                        </label>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* Class Teacher Select */}
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Designate Class Teacher</label>
+                  <select
+                    value={classForm.classTeacherId}
+                    onChange={(e) => setClassForm({ ...classForm, classTeacherId: e.target.value })}
+                    className="w-full text-xs px-3 py-2 bg-white border border-slate-200 rounded-lg outline-teal-500 shadow-3xs"
+                  >
+                    <option value="">-- Choose Class Teacher --</option>
+                    {teachers.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name} ({t.subject}) {t.classTeacherOf ? `[Class Teacher of ${t.classTeacherOf}]` : "[Available]"}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex items-center justify-between pt-1">
+                  {classSuccess && (
+                    <span className="text-[11px] font-bold text-emerald-600 flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5" /> Class created successfully!
+                    </span>
+                  )}
+                  {!classSuccess && <span />}
+                  <button
+                    type="submit"
+                    className="px-4 py-2 bg-teal-600 hover:bg-teal-755 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Create Class & Section
+                  </button>
+                </div>
+              </form>
+
+              {/* Classes & Sections Roster */}
+              <div className="space-y-2">
+                <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Active Classroom Registers ({classes.length})</h5>
+                <div className="border border-slate-200 rounded-xl overflow-hidden">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-200 text-[10px] uppercase font-bold text-slate-400 font-mono">
+                        <th className="px-4 py-2.5">Class/Sec</th>
+                        <th className="px-4 py-2.5">Subjects</th>
+                        <th className="px-4 py-2.5">Class Teacher</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
+                      {classes.length === 0 ? (
+                        <tr>
+                          <td colSpan={3} className="px-4 py-6 text-center text-slate-400 font-mono">No classes registered yet.</td>
+                        </tr>
+                      ) : (
+                        classes.map((cls) => {
+                          const designatedTeacher = teachers.find(t => t.id === cls.classTeacherId || t.classTeacherOf === cls.name);
+                          return (
+                            <tr key={cls.id} className="hover:bg-slate-50/50 transition-colors">
+                              <td className="px-4 py-2.5 font-bold text-teal-700">{cls.name}</td>
+                              <td className="px-4 py-2.5">
+                                <div className="flex flex-wrap gap-1">
+                                  {cls.assignedSubjects.map((sub, i) => (
+                                    <span key={i} className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded text-[9px] font-medium text-slate-600">{sub}</span>
+                                  ))}
+                                  {cls.assignedSubjects.length === 0 && <span className="text-slate-400 font-mono text-[10px]">None</span>}
+                                </div>
+                              </td>
+                              <td className="px-4 py-2.5 font-medium text-slate-900">
+                                {designatedTeacher ? (
+                                  <span className="flex items-center gap-1 text-slate-800">
+                                    <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                                    {designatedTeacher.name}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400 italic">Not Assigned</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            </div>
+
+          </div>
+
+        </div>
+      )}
+
       {/* 1. EXAMS & REPORT CARDS */}
       {activeSection === "exams" && (
         <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4 animate-in fade-in slide-in-from-bottom-3 duration-200">
@@ -532,8 +1182,18 @@ export default function SuperAdminDashboard({
                       onChange={(e) => setNewStudent({ ...newStudent, grade: e.target.value })}
                       className="w-full text-sm px-3 py-2 border border-slate-200 rounded-lg outline-indigo-500"
                     >
-                      <option value="10-A">10-A (Secondary)</option>
-                      <option value="9-B">9-B (Basic)</option>
+                      {classes.length === 0 ? (
+                        <>
+                          <option value="10-A">10-A (Secondary)</option>
+                          <option value="9-B">9-B (Basic)</option>
+                        </>
+                      ) : (
+                        classes.map((cls) => (
+                          <option key={cls.id} value={cls.name}>
+                            Class {cls.name} (Section {cls.section})
+                          </option>
+                        ))
+                      )}
                     </select>
                   </div>
 
@@ -1231,20 +1891,94 @@ export default function SuperAdminDashboard({
               </span>
             </div>
 
+            {/* Class Teacher Designation Hub */}
+            <div className="bg-slate-50 p-4 rounded-xl border border-slate-205 mb-6 font-sans">
+              <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-sans">
+                <UserCheck className="w-4 h-4 text-emerald-600 shrink-0 animate-pulse" />
+                Class Teacher Designation Hub (Assign Class Teacher)
+              </h4>
+              <p className="text-[11px] text-slate-500 mb-4 leading-normal">
+                Designate a master Lead Class Teacher for each grade stream to unlock individual and class report operations for that teacher.
+              </p>
+              
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {["10-A", "9-B"].map((grade) => {
+                  // Find current teacher assigned to this grade as class teacher
+                  const currentClassTeacher = teachers.find((t) => t.classTeacherOf === grade);
+                  return (
+                    <div key={grade} className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs flex flex-col justify-between gap-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-extrabold text-slate-900 bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded border border-indigo-100 font-mono tracking-wide">
+                          Class {grade}
+                        </span>
+                        {currentClassTeacher ? (
+                          <span className="text-[9.5px] text-emerald-700 font-bold bg-emerald-50 border border-emerald-100/60 px-2 py-0.5 rounded uppercase tracking-wider font-sans">
+                            Teacher Assigned
+                          </span>
+                        ) : (
+                          <span className="text-[9.5px] text-rose-600 font-bold bg-rose-50 border border-rose-100/60 px-2 py-0.5 rounded uppercase tracking-wider font-sans">
+                            Assigned Vacant
+                          </span>
+                        )}
+                      </div>
+                      
+                      <div className="min-h-10 flex flex-col justify-center">
+                        {currentClassTeacher ? (
+                          <div>
+                            <p className="text-xs font-semibold text-slate-700">Designated Lead:</p>
+                            <p className="text-sm font-bold text-slate-900 mt-0.5">{currentClassTeacher.name}</p>
+                            <p className="text-[10px] text-indigo-600 font-medium">{currentClassTeacher.subject} Master</p>
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-400 italic">No class teacher designated for stream {grade}. Assign below.</p>
+                        )}
+                      </div>
+
+                      <div className="pt-1.5 border-t border-slate-100">
+                        <select
+                          value={currentClassTeacher?.id || ""}
+                          onChange={async (e) => {
+                            if (onAssignClassTeacher) {
+                              await onAssignClassTeacher(e.target.value, grade);
+                            }
+                          }}
+                          className="w-full text-xs font-semibold pr-8 bg-[#F8FAFC] border border-slate-200 hover:border-slate-300 rounded-lg outline-indigo-500 cursor-pointer text-slate-700 p-2"
+                        >
+                          <option value="">-- Choose Lead Class Teacher --</option>
+                          {teachers.map((t) => (
+                            <option key={t.id} value={t.id}>
+                              {t.name} ({t.subject})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
             <div className="divide-y divide-slate-100">
               {teachers.map((t) => (
-                <div key={t.id} className="py-3 flex sm:items-center justify-between flex-col sm:flex-row gap-2">
+                <div key={t.id} className="py-3.5 flex sm:items-center justify-between flex-col sm:flex-row gap-2">
                   <div>
-                    <h4 className="text-sm font-semibold text-slate-900">{t.name}</h4>
+                    <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+                      {t.name}
+                      {t.classTeacherOf && (
+                        <span className="text-[9.5px] bg-emerald-50 text-emerald-800 border border-emerald-150 px-2 py-0.5 rounded font-bold uppercase tracking-wider font-mono">
+                          ★ Class Teacher: {t.classTeacherOf}
+                        </span>
+                      )}
+                    </h4>
                     <p className="text-xs text-slate-500 font-mono mt-0.5">{t.email}</p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-medium px-2 py-1 bg-slate-100 text-slate-800 rounded-md">
+                    <span className="text-xs font-semibold px-2 py-1 bg-slate-100 text-slate-700 rounded-md">
                       {t.subject}
                     </span>
                     <div className="flex items-center gap-1.5">
                       {t.assignedGrades.map((g, gi) => (
-                        <span key={gi} className="text-[10px] bg-sky-50 text-sky-800 border border-sky-100 px-1.5 py-0.5 rounded-sm">
+                        <span key={gi} className="text-[10px] bg-sky-50 text-sky-850 border border-sky-100 px-1.5 py-0.5 rounded-sm">
                           Class {g}
                         </span>
                       ))}
