@@ -8,57 +8,38 @@ service cloud.firestore {
     }
 
     // Helper Primitives
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
-    function getUserEmail() {
-      return request.auth.token.email;
-    }
-
     function isValidId(id) {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
-    function incoming() {
-      return request.resource.data;
-    }
-
-    function existing() {
-      return resource.data;
-    }
-
-    // Check if the user is a school staff (SuperAdmin, Teacher, Principal)
-    // Note: Default to true for authenticated development workspace users, but check email
-    function isStaff() {
-      return isSignedIn() && (
-        request.auth.token.email_verified == true || 
-        getUserEmail() != null
-      );
-    }
-
     // Students collection rules
     match /students/{studentId} {
-      allow read: if isSignedIn();
-      allow write: if isStaff() && isValidId(studentId);
+      allow read, write: if isValidId(studentId);
     }
 
     // Teachers collection rules
     match /teachers/{teacherId} {
-      allow read: if isSignedIn();
-      allow write: if isStaff() && isValidId(teacherId);
+      allow read, write: if isValidId(teacherId);
     }
 
     // LibraryBooks collection rules
     match /libraryBooks/{bookId} {
-      allow read: if isSignedIn();
-      allow write: if isStaff() && isValidId(bookId);
+      allow read, write: if isValidId(bookId);
     }
 
     // Timetable collection rules
     match /timetable/{slotId} {
-      allow read: if isSignedIn();
-      allow write: if isStaff() && isValidId(slotId);
+      allow read, write: if isValidId(slotId);
+    }
+
+    // School State collection rules (used by full-stack server for database persistence backup)
+    match /school_state/{docId} {
+      allow read, write: if isValidId(docId);
+    }
+
+    // Test collection rules for connection health check
+    match /test/{docId} {
+      allow read, write: if isValidId(docId);
     }
   }
 }

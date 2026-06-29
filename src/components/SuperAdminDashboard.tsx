@@ -10,7 +10,7 @@ import ScholasticResultsLedger from "./ScholasticResultsLedger";
 import SchoolFeesRegistry from "./SchoolFeesRegistry";
 import { db, handleFirestoreError, OperationType } from "../firebase";
 import { doc, setDoc } from "firebase/firestore";
-import { supabase, SUPABASE_SQL_SCHEMA, testSupabaseConnection } from "../supabase";
+import { supabase, SUPABASE_SQL_SCHEMA, testSupabaseConnection, resetSupabaseClient } from "../supabase";
 
 
 interface SuperAdminDashboardProps {
@@ -166,6 +166,37 @@ export default function SuperAdminDashboard({
   const [supabaseConnected, setSupabaseConnected] = useState<boolean | null>(null);
   const [copiedSql, setCopiedSql] = useState(false);
   const [showSqlEditor, setShowSqlEditor] = useState(false);
+
+  const [customSupaUrl, setCustomSupaUrl] = useState(() => localStorage.getItem("custom_supabase_url") || "");
+  const [customSupaKey, setCustomSupaKey] = useState(() => localStorage.getItem("custom_supabase_anon_key") || "");
+
+  const handleSaveSupabaseCreds = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!customSupaUrl.trim() || !customSupaKey.trim()) {
+      alert("Please provide both a valid Supabase project URL and a public anonymous key.");
+      return;
+    }
+    localStorage.setItem("custom_supabase_url", customSupaUrl.trim());
+    localStorage.setItem("custom_supabase_anon_key", customSupaKey.trim());
+    resetSupabaseClient();
+    setSupabaseSyncStatus("Testing new credentials...");
+    const isOk = await checkSupabaseConn();
+    if (isOk) {
+      setSupabaseSyncStatus("Successfully connected!");
+    } else {
+      setSupabaseSyncStatus("Handshake failed. Check keys.");
+    }
+    setTimeout(() => setSupabaseSyncStatus(null), 4000);
+  };
+
+  const handleResetSupabaseCreds = () => {
+    localStorage.removeItem("custom_supabase_url");
+    localStorage.removeItem("custom_supabase_anon_key");
+    setCustomSupaUrl("");
+    setCustomSupaKey("");
+    resetSupabaseClient();
+    checkSupabaseConn();
+  };
 
   const checkSupabaseConn = async () => {
     const check = await testSupabaseConnection();
@@ -683,7 +714,58 @@ export default function SuperAdminDashboard({
 
       {/* SUPABASE DEPLOYMENT GUIDE & COPIER */}
       {showSqlEditor && (
-        <div className="bg-slate-900 border border-slate-800 text-slate-100 rounded-2xl p-6 shadow-md space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
+        <div className="bg-slate-900 border border-slate-800 text-slate-100 rounded-2xl p-6 shadow-md space-y-5 animate-in fade-in slide-in-from-top-2 duration-300">
+          
+          {/* Custom Credentials Configuration Form */}
+          <form onSubmit={handleSaveSupabaseCreds} className="bg-slate-950 p-5 rounded-xl border border-slate-800 space-y-4">
+            <h4 className="text-sm font-bold text-white flex items-center gap-2">
+              <Key className="w-4 h-4 text-emerald-400" />
+              Configure Custom Supabase Cloud Credentials
+            </h4>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              If you want to sync this system's databases to your own hosted Supabase project, paste your credentials below. This allows real-time cloud sync directly from this admin panel. Leave empty or click <strong>Reset</strong> to return to default unconfigured mode.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-slate-400 uppercase font-mono">Supabase Project URL</label>
+                <input
+                  type="url"
+                  placeholder="https://your-project-id.supabase.co"
+                  value={customSupaUrl}
+                  onChange={(e) => setCustomSupaUrl(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-hidden focus:border-emerald-500"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-slate-400 uppercase font-mono">Public Anon API Key (JWT)</label>
+                <input
+                  type="password"
+                  placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                  value={customSupaKey}
+                  onChange={(e) => setCustomSupaKey(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-hidden focus:border-emerald-500"
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={handleResetSupabaseCreds}
+                className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-slate-300 font-semibold text-xs rounded-lg transition cursor-pointer select-none"
+              >
+                Reset to Default
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-lg shadow-sm transition active:scale-98 cursor-pointer select-none"
+              >
+                Save & Connect Handshake
+              </button>
+            </div>
+          </form>
+
+          <div className="border-t border-slate-850 my-2"></div>
+
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div className="space-y-1">
               <span className="text-[10px] bg-emerald-500/20 text-emerald-400 font-extrabold px-2.5 py-0.5 rounded-full uppercase tracking-wider font-mono">

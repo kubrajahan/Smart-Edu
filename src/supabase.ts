@@ -3,25 +3,68 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createClient } from "@supabase/supabase-js";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
-// Clean the provided project URL to ensure the base domain is used for Supabase client initialization
-const rawUrl = "https://wnwdiasbotcfqgxtrqag.supabase.co/rest/v1/";
-export const supabaseUrl = rawUrl.replace(/\/rest\/v1\/?$/, "").trim();
-export const supabaseAnonKey = "sb_publishable_ZENWrWLcXOh8fXNbPrjS_A_HS1ifYC6";
+// Load from localStorage or fallback
+const defaultUrl = "https://wnwdiasbotcfqgxtrqag.supabase.co";
+const defaultKey = "sb_publishable_ZENWrWLcXOh8fXNbPrjS_A_HS1ifYC6";
 
-// Initialize Supabase Client
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export function getSupabaseCredentials() {
+  const url = localStorage.getItem("custom_supabase_url") || defaultUrl;
+  const key = localStorage.getItem("custom_supabase_anon_key") || defaultKey;
+  return { url: url.trim(), key: key.trim() };
+}
+
+let activeClient: SupabaseClient | null = null;
+
+export function getSupabaseClient(): SupabaseClient {
+  const { url, key } = getSupabaseCredentials();
+  if (!activeClient) {
+    activeClient = createClient(url, key);
+  }
+  return activeClient;
+}
+
+export function resetSupabaseClient() {
+  activeClient = null;
+}
+
+// Export a Proxy that behaves exactly like a SupabaseClient but dynamically retrieves the active client
+export const supabase = new Proxy({} as SupabaseClient, {
+  get(target, prop, receiver) {
+    const client = getSupabaseClient();
+    const value = Reflect.get(client, prop);
+    if (typeof value === 'function') {
+      return value.bind(client);
+    }
+    return value;
+  }
+});
+
+// For backwards compatibility and legacy lookups
+export const supabaseUrl = defaultUrl;
+export const supabaseAnonKey = defaultKey;
 
 /**
  * Diagnostic helper to verify Supabase REST API connection
  */
 export async function testSupabaseConnection(): Promise<{ success: boolean; message: string }> {
   try {
-    const response = await fetch(`${supabaseUrl}/rest/v1/`, {
+    const { url, key } = getSupabaseCredentials();
+    
+    // Check if the credentials are the default placeholders or invalid/empty
+    if (!url || !key || key === defaultKey || key.includes("sb_publishable_") || url.includes("wnwdiasbotcfqgxtrqag")) {
+      return {
+        success: false,
+        message: "Supabase connection is not configured with custom active credentials."
+      };
+    }
+
+    const cleanedUrl = url.replace(/\/rest\/v1\/?$/, "").trim();
+    const response = await fetch(`${cleanedUrl}/rest/v1/`, {
       method: "GET",
       headers: {
-        "apikey": supabaseAnonKey
+        "apikey": key
       }
     });
     
